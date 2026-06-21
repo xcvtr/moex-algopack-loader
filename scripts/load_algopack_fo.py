@@ -53,6 +53,11 @@ OBS_COLS_RAW = ["tradedate","tradetime","secid","asset_code",
     "vol_b_l10","vol_s_l10","vol_b_l20","vol_s_l20",
     "vwap_b_l3","vwap_s_l3","SYSTIME"]
 
+# obstats columns with int types (API may return float or empty string)
+OBS_INT_COLS = {"levels_b","levels_s","vol_b_l1","vol_s_l1","vol_b_l2","vol_s_l2",
+    "vol_b_l3","vol_s_l3","vol_b_l5","vol_s_l5",
+    "vol_b_l10","vol_s_l10","vol_b_l20","vol_s_l20"}
+
 ORD_COLS_RAW = ["tradedate","tradetime","secid","asset_code",
     "put_cancel_ratio","orders_b_put","orders_s_put",
     "orders_b_cancel","orders_s_cancel",
@@ -85,23 +90,36 @@ TS_CONV = {
 DATASETS = {
     "tradestats": {"cols_raw": TS_COLS_RAW, "table": "tradestats_fo", "conv": TS_CONV},
     "obstats":    {"cols_raw": OBS_COLS_RAW, "table": "obstats_fo",
-                   "conv": {'tradedate': _conv_tradedate, 'SYSTIME': _conv_systime}},
+                   "conv": {'tradedate': _conv_tradedate, 'SYSTIME': _conv_systime},
+                   "int_cols": OBS_INT_COLS, "str_cols": {"asset_code"}},
     "orderstats": {"cols_raw": ORD_COLS_RAW, "table": "orderstats_fo",
                    "conv": {'tradedate': _conv_tradedate, 'SYSTIME': _conv_systime}},
 }
 
 # ── Helpers ────────────────────────────────────────────────────────────
 
-def convert_row(cols_raw, row, conv_map):
+def convert_row(cols_raw, row, conv_map, int_cols=None, str_cols=None):
     converted = []
     for c, v in zip(cols_raw, row):
         if c in conv_map:
             converted.append(conv_map[c](v))
+        elif int_cols and c in int_cols:
+            # int columns: API may return float or empty string
+            if v is None or v == '':
+                converted.append(None)
+            else:
+                converted.append(int(float(v)))
+        elif str_cols and c in str_cols:
+            # string columns: None -> ''
+            if v is None:
+                converted.append('')
+            else:
+                converted.append(_conv_null(v))
         else:
             converted.append(_conv_null(v))
     return converted
 
-def fetch_date_all(dataset, date_str, cols_raw, conv_map):
+def fetch_date_all(dataset, date_str, cols_raw, conv_map, int_cols=None, str_cols=None):
     url = f"{API_BASE}/{dataset}.json"
     all_rows = []
     start = 0
@@ -124,7 +142,7 @@ def fetch_date_all(dataset, date_str, cols_raw, conv_map):
             continue
     if not all_rows:
         return []
-    return [convert_row(cols_raw, row, conv_map) for row in all_rows]
+    return [convert_row(cols_raw, row, conv_map, int_cols, str_cols) for row in all_rows]
 
 def insert_batch(ch, table, rows, cols_raw):
     if not rows:
@@ -211,7 +229,8 @@ def main():
         batch_buffer = []
 
         with ThreadPoolExecutor(max_workers=args.workers) as pool:
-            futs = {pool.submit(fetch_date_all, ds_name, d, cols_raw, conv_map): d for d in pending}
+            futs = {pool.submit(fetch_date_all, ds_name, d, cols_raw, conv_map,
+                                ds.get("int_cols"), ds.get("str_cols")): d for d in pending}
             for fut in as_completed(futs):
                 d = futs[fut]
                 rows = fut.result()

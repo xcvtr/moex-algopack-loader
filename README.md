@@ -1,4 +1,4 @@
-# moex-algopack
+# moex-algopack-loader
 
 MOEX AlgoPack fo/ data loader — общий источник данных AlgoPack для всех TQA-проектов.
 
@@ -157,6 +157,24 @@ python3 scripts/load_algopack_fo.py --datasets obstats orderstats
 
 Копируется из TQA-MOEX-futures при первом запуске `run_daily.sh`.
 Или вручную: `cp /path/to/TQA-MOEX-futures/.env .env`
+
+## Legacy: moex_algopack_v2
+
+Старая БД с Distributed таблицами (предыдущая версия загрузчика).
+Содержит ~3.44M строк по tradestats/obstats/orderstats (старые данные, без OI-полей).
+
+**Переезд:** `moex_algopack_v2.tradestats` заменён на VIEW, который читает из `moex.tradestats_fo` (21M строк). Все скрипты, обращающиеся к `moex_algopack_v2.tradestats`, теперь получают актуальные данные.
+
+Обновление скриптов на новую схему:
+```python
+# Старое (работает через VIEW):
+ch.query("SELECT ticker, disb FROM moex_algopack_v2.tradestats")
+
+# Новое (напрямую):
+ch.query("SELECT asset_code AS ticker, disb FROM moex.tradestats_fo")
+```
+
+`moex_algopack_v2.obstats` и `moex_algopack_v2.orderstats` остаются как есть — их схемы несовместимы с `obstats_fo`/`orderstats_fo`.
 
 ## Структура
 
