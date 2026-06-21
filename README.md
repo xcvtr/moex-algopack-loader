@@ -26,8 +26,11 @@ MOEX AlgoPack fo/ data loader — общий источник данных AlgoP
 | Датасет | Таблица CH | Статус | Строк | Что содержит |
 |---------|-----------|--------|-------|-------------|
 | `tradestats` | `moex.tradestats_fo` | ✅ | 21M | OHLC, OI (open/high/low/close), disb, vol_b/s, VWAP |
-| `obstats` | `moex.obstats_fo` | 🔄 | 0 | Стакан (спреды, объёмы на L1-L20, micro/mid price) |
-| `orderstats` | `moex.orderstats_fo` | ❌ | 0 | Заявки (put/cancel ratio, orders_b/s_put, orders_b/s_cancel, VWAP) — **API отдаёт пусто** |
+| `obstats` | `moex.obstats_fo` | ✅ | 47M | Стакан (спреды, объёмы на L1-L20, micro/mid price) |
+| `orderstats` | `moex.orderstats_fo` | ❌ | 0 | Заявки — **API отдаёт пусто** |
+| `hi2` | `moex.hi2_fo` | ✅ | 1.1M | HHI-индекс концентрации рынка |
+| `alerts` | `moex.alerts_fo` | ✅ | 331K | События 99.9 перцентиля |
+| `futoi` | `moex.futoi` | ✅ | 1.6M | Позиции FIZ/YUR по 78 фьючерсам |
 
 Период: 2020-01-03 — настоящее время (торговые дни).
 Данные лежат в ClickHouse на **10.0.0.63:8123** (без пароля, БД `moex`).

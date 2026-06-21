@@ -63,6 +63,12 @@ ORD_COLS_RAW = ["tradedate","tradetime","secid","asset_code",
     "orders_b_cancel","orders_s_cancel",
     "vwap_b","vwap_s","SYSTIME"]
 
+HI2_COLS_RAW = ["tradedate","tradetime","secid","asset_code",
+    "metric","value","reference","SYSTIME"]
+
+ALERT_COLS_RAW = ["tradedate","tradetime","secid","asset_code",
+    "alert_type","threshold","value","reference","SYSTIME"]
+
 # ── Type converters ────────────────────────────────────────────────────
 
 def _conv_tradedate(v):
@@ -82,10 +88,46 @@ def _conv_null(v):
     if v == '' or v is None: return None
     return v
 
+def _conv_date_or_none(v):
+    if v is None or v == '':
+        return None
+    if isinstance(v, str):
+        return date.fromisoformat(v)
+    return v
+
 TS_CONV = {
     'tradedate': _conv_tradedate,
     'SYSTIME': _conv_systime,
 }
+
+FUTOI_COLS_RAW = ["sess_id","seqnum","tradedate","tradetime","ticker",
+    "clgroup","pos","pos_long","pos_short",
+    "pos_long_num","pos_short_num","systime","trade_session_date"]
+
+FUTOI_CONV = {
+    'tradedate': _conv_tradedate,
+    'trade_session_date': _conv_date_or_none,
+    'systime': _conv_systime,
+}
+
+# ── FUTOI: другой endpoint, другой формат JSON ────────────────────────
+
+FUTOI_API = "https://apim.moex.com/iss/analyticalproducts/futoi/securities.json"
+
+def fetch_futoi_date(date_str, cols_raw):
+    """Fetch FUTOI — single request, no pagination (API returns all at once)."""
+    try:
+        params = {"date": date_str, "limit": 10000, "start": 0}
+        r = requests.get(FUTOI_API, params=params, headers=HEADERS, timeout=60)
+        if r.status_code != 200:
+            return []
+        rows = r.json().get("futoi", {}).get("data", [])
+        if not rows:
+            return []
+        return [convert_row(cols_raw, row, FUTOI_CONV) for row in rows]
+    except Exception as e:
+        print(f"  ERR futoi {date_str}: {e}", file=sys.stderr)
+        return []
 
 DATASETS = {
     "tradestats": {"cols_raw": TS_COLS_RAW, "table": "tradestats_fo", "conv": TS_CONV},
@@ -94,10 +136,14 @@ DATASETS = {
                    "int_cols": OBS_INT_COLS, "str_cols": {"asset_code"}},
     "orderstats": {"cols_raw": ORD_COLS_RAW, "table": "orderstats_fo",
                    "conv": {'tradedate': _conv_tradedate, 'SYSTIME': _conv_systime}},
+    "hi2":       {"cols_raw": HI2_COLS_RAW, "table": "hi2_fo",
+                  "conv": {'tradedate': _conv_tradedate, 'SYSTIME': _conv_systime}},
+    "alerts":    {"cols_raw": ALERT_COLS_RAW, "table": "alerts_fo",
+                  "conv": {'tradedate': _conv_tradedate, 'SYSTIME': _conv_systime}},
+    "futoi":     {"cols_raw": FUTOI_COLS_RAW, "table": "futoi",
+                  "conv": {'tradedate': _conv_tradedate, 'SYSTIME': _conv_systime},
+                  "fetch_fn": fetch_futoi_date},
 }
-
-# ── Helpers ────────────────────────────────────────────────────────────
-
 def convert_row(cols_raw, row, conv_map, int_cols=None, str_cols=None):
     converted = []
     for c, v in zip(cols_raw, row):
@@ -228,9 +274,31 @@ def main():
         done = 0
         batch_buffer = []
 
-        with ThreadPoolExecutor(max_workers=args.workers) as pool:
-            futs = {pool.submit(fetch_date_all, ds_name, d, cols_raw, conv_map,
-                                ds.get("int_cols"), ds.get("str_cols")): d for d in pending}
+        fetch_fn = ds.get("fetch_fn", None)
+
+        if fetch_fn:
+            # Кастомный fetch (FUTOI) — однопоточный (нет пагинации)
+            for d in pending:
+                rows = fetch_fn(d, cols_raw)
+                done += 1
+                if rows:
+                    batch_buffer.extend(rows)
+                    total_rows += len(rows)
+                    if len(batch_buffer) >= 50000:
+                        insert_batch(ch, table, batch_buffer, cols_raw)
+                        batch_buffer = []
+                if done % 20 == 0 or done == len(pending):
+                    elapsed = time.time() - t0
+                    rate = done / elapsed if elapsed > 0 else 0
+                    eta = (len(pending) - done) / rate if rate > 0 else 0
+                    print(f"  {ds_name}: {done}/{len(pending)} days, {total_rows} rows, "
+                          f"{rate:.1f}/s, ETA {eta:.0f}s", file=sys.stderr)
+            if batch_buffer:
+                insert_batch(ch, table, batch_buffer, cols_raw)
+        else:
+            with ThreadPoolExecutor(max_workers=args.workers) as pool:
+                futs = {pool.submit(fetch_date_all, ds_name, d, cols_raw, conv_map,
+                                    ds.get("int_cols"), ds.get("str_cols")): d for d in pending}
             for fut in as_completed(futs):
                 d = futs[fut]
                 rows = fut.result()
