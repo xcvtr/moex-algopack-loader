@@ -4,15 +4,18 @@ MOEX AlgoPack fo/ data loader — общий источник данных AlgoP
 
 ## Топология ClickHouse
 
-**Кластер:** 2 ноды, `ReplicatedMergeTree`
+**Кластер:** 2 ноды, `ReplicatedMergeTree`. Есть VIP для чтения.
 
-| Роль | Хост | Порт |
-|------|------|------|
-| Primary (запись) | `10.0.0.63` | `8123` (HTTP) / `9000` (native) |
-| Replica (чтение) | `10.0.0.60` | `8123` (HTTP) / `9000` (native) |
+| Роль | Хост | Макросы | Порт |
+|------|------|---------|------|
+| Primary (запись) | `10.0.0.63` | `replica=1, shard=1` | `8123` (HTTP) / `9000` (native) |
+| Replica (чтение) | `10.0.0.60` | `replica=2, shard=1` | `8123` (HTTP) / `9000` (native) |
+| VIP (replica) | `10.0.0.64` | → `10.0.0.60` | `8123` (HTTP) / `9000` (native) |
 
-**Загрузчик пишет на 63**, репликация — на уровне ReplicatedMergeTree.
-Читать можно с любого хоста, БД `moex`, без пароля.
+**Загрузчик пишет на primary (63).** Читать можно с любого хоста — все три указывают в БД `moex` без пароля.
+
+⚠️ **Важно:** таблицы объявлены как `ReplicatedMergeTree`, но на репликах (60/64) данные отсутствуют — репликация не настроена. Для потребителей сейчас актуален только **primary `10.0.0.63`**.
+
 
 ## Назначение
 
@@ -98,16 +101,17 @@ SYSTIME        Nullable(DateTime64(6))
 
 ## Для потребителей данных
 
-Все три таблицы доступны **на чтение без аутентификации** с любого хоста кластера:
+Таблицы доступны **на чтение без аутентификации**:
 
 ```
 clickhouse-client --host 10.0.0.63 --port 9000 --database moex   # primary
-clickhouse-client --host 10.0.0.60 --port 9000 --database moex   # replica
 ```
 
-Или через HTTP API:
-```
-curl "http://10.0.0.63:8123/?query=SELECT%20count()%20FROM%20moex.tradestats_fo"
+Или через HTTP API (например, из Python):
+```python
+import clickhouse_connect
+ch = clickhouse_connect.get_client(host='10.0.0.63', port=8123, database='moex')
+ch.query('SELECT count() FROM tradestats_fo')
 ```
 
 Пример для option-rf (часовые агрегаты OI фьючерса):
