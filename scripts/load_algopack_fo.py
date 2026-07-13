@@ -15,8 +15,8 @@ from datetime import date, timedelta, datetime
 import requests
 import clickhouse_connect
 
-CH_HOST = "10.0.0.63"
-CH_PORT = 8123
+CH_HOST = os.environ.get("CH_HOST", "10.0.0.60")
+CH_PORT = int(os.environ.get("CH_PORT", "8123"))
 CH_DB = "moex"
 API_BASE = "https://apim.moex.com/iss/datashop/algopack/fo"
 
@@ -88,6 +88,17 @@ def _conv_null(v):
     if v == '' or v is None: return None
     return v
 
+def _conv_tradetime(v):
+    """Convert tradetime -> HH:MM:SS string.
+    Post-processing in convert_row combines with tradedate."""
+    if v is None or v == '':
+        return None
+    if isinstance(v, str) and len(v) == 8 and v[2] == ':' and v[5] == ':':
+        return v  # time-only string, will be combined in convert_row
+    if isinstance(v, datetime):
+        return v.strftime('%H:%M:%S')
+    return str(v)
+
 def _conv_date_or_none(v):
     if v is None or v == '':
         return None
@@ -137,18 +148,23 @@ DATASETS = {
     "orderstats": {"cols_raw": ORD_COLS_RAW, "table": "orderstats_fo",
                    "conv": {'tradedate': _conv_tradedate, 'SYSTIME': _conv_systime}},
     "hi2":       {"cols_raw": HI2_COLS_RAW, "table": "hi2_fo",
-                  "conv": {'tradedate': _conv_tradedate, 'SYSTIME': _conv_systime}},
+                  "conv": {'tradedate': _conv_tradedate, 'tradetime': _conv_tradetime, 'SYSTIME': _conv_systime},
+                  "str_cols": {"reference", "asset_code"}},
     "alerts":    {"cols_raw": ALERT_COLS_RAW, "table": "alerts_fo",
-                  "conv": {'tradedate': _conv_tradedate, 'SYSTIME': _conv_systime}},
+                  "conv": {'tradedate': _conv_tradedate, 'tradetime': _conv_tradetime, 'SYSTIME': _conv_systime},
+                  "str_cols": {"reference", "asset_code"}},
     "futoi":     {"cols_raw": FUTOI_COLS_RAW, "table": "futoi",
                   "conv": {'tradedate': _conv_tradedate, 'SYSTIME': _conv_systime},
                   "fetch_fn": fetch_futoi_date},
 }
 def convert_row(cols_raw, row, conv_map, int_cols=None, str_cols=None):
     converted = []
+    tradedate_val = None
     for c, v in zip(cols_raw, row):
         if c in conv_map:
             converted.append(conv_map[c](v))
+            if c == 'tradedate':
+                tradedate_val = v
         elif int_cols and c in int_cols:
             # int columns: API may return float or empty string
             if v is None or v == '':
@@ -156,13 +172,28 @@ def convert_row(cols_raw, row, conv_map, int_cols=None, str_cols=None):
             else:
                 converted.append(int(float(v)))
         elif str_cols and c in str_cols:
-            # string columns: None -> ''
+            # string columns: None -> '', empty string stays as ''
             if v is None:
                 converted.append('')
+            elif v == '':
+                converted.append('')
             else:
-                converted.append(_conv_null(v))
+                converted.append(v)
         else:
             converted.append(_conv_null(v))
+    # Post-process: combine date-only tradedate + time-only tradetime into full DateTime
+    # BUT store tradetime as String (CH column type)
+    for i, (c, v) in enumerate(zip(cols_raw, converted)):
+        if c == 'tradetime' and v is not None and isinstance(v, str) and len(v) == 8 and v[2] == ':' and v[5] == ':':
+            if tradedate_val:
+                if isinstance(tradedate_val, date):
+                    dt = datetime.combine(tradedate_val, datetime.strptime(v, '%H:%M:%S').time())
+                    converted[i] = dt.strftime('%H:%M:%S')  # keep as string
+                elif isinstance(tradedate_val, str) and len(tradedate_val) == 10:
+                    converted[i] = v  # keep original time string
+        # Also convert SYSTIME to string if it's datetime (CH column is String or DateTime64)
+        if c == 'SYSTIME' and isinstance(v, datetime):
+            converted[i] = v.strftime('%Y-%m-%d %H:%M:%S')
     return converted
 
 def fetch_date_all(dataset, date_str, cols_raw, conv_map, int_cols=None, str_cols=None):
@@ -193,10 +224,20 @@ def fetch_date_all(dataset, date_str, cols_raw, conv_map, int_cols=None, str_col
 def insert_batch(ch, table, rows, cols_raw):
     if not rows:
         return
-    try:
-        ch.insert(table, rows, column_names=cols_raw)
-    except Exception as e:
-        print(f"  CH INSERT ERR {table}: {e}", file=sys.stderr)
+    MAX_CHUNK = 1000  # smaller chunks to avoid nginx 413
+    for i in range(0, len(rows), MAX_CHUNK):
+        chunk = rows[i:i+MAX_CHUNK]
+        try:
+            ch.insert(table, chunk, column_names=cols_raw)
+        except Exception as e:
+            print(f"  CH INSERT ERR {table} (chunk {i}): {e}", file=sys.stderr)
+            time.sleep(1)
+            # retry with even smaller chunk
+            try:
+                for j in range(0, len(chunk), 200):
+                    ch.insert(table, chunk[j:j+200], column_names=cols_raw)
+            except Exception as e2:
+                print(f"  CH INSERT RETRY FAIL {table}: {e2}", file=sys.stderr)
 
 def generate_dates(start, end):
     d = start
